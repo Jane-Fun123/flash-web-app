@@ -2,80 +2,63 @@ name: Deploy Flask App to Touge Server
 on:
   push:
     branches:
-      - main  # 监听main分支推送，触发工作流
+      - main
 jobs:
   deploy:
-    runs-on: ubuntu-latest  # 使用GitHub提供的Ubuntu虚拟环境
-    timeout-minutes: 10     # 工作流超时时间（避免无限等待）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      # 步骤1：拉取当前GitHub仓库的代码
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # 只拉取最新1次提交，加快速度
-
-      # 步骤2：配置Python 3.11环境（与项目依赖兼容）
+          fetch-depth: 1
+      
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # 指定Python版本
-          cache: 'pip'            # 缓存pip依赖，减少重复安装时间
-          cache-dependency-path: requirements.txt  # 指定依赖清单路径
-
-      # 步骤3：安装项目依赖并执行自动化测试（测试失败则终止部署）
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+      
       - name: Install dependencies and run tests
         run: |
-          python -m pip install --upgrade pip  # 更新pip到最新版本
-          pip install -r requirements.txt       # 安装项目依赖（如Flask）
-          pip install pytest==8.4.1             # 安装指定版本的测试工具pytest
-          pytest tests/ -v                      # 执行测试用例并显示详细日志
-        continue-on-error: false  # 测试失败时，立即终止工作流（避免无效部署）
-
-      # 步骤4：通过SSH连接头歌服务器，执行自动化部署
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==8.4.1
+          pytest tests/ -v
+        continue-on-error: false
+      
       - name: Deploy to Touge Server via SSH
         run: |
-          # 1. 配置SSH环境（创建.ssh目录，避免目录不存在报错）
+          # 配置SSH环境
           mkdir -p ~/.ssh
           
-          # 2. 写入SSH私钥（用printf确保私钥格式完整，避免换行丢失）
-          printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          # 写入SSH私钥
+          echo "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           
-          # 3. 设置私钥权限（SSH协议强制要求600，否则拒绝使用私钥登录）
+          # 设置私钥权限
           chmod 600 ~/.ssh/id_rsa
           
-          # 4. 扫描服务器主机密钥（避免首次连接时手动确认"是否信任主机"）
-          # 关键：命令与>>在同一行，引用Secrets中的端口变量
-          ssh-keyscan -p ${{ secrets.TOUGE_SSH_PORT }} -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
+          # 扫描主机密钥（使用Secrets中的端口）
+          ssh-keyscan -p "${{ secrets.TOUGE_SSH_PORT }}" -H "${{ secrets.TOUGE_SERVER_IP }}" >> ~/.ssh/known_hosts
+          
           echo "SSH环境配置完成，尝试连接服务器..."
           
-          # 5. SSH连接服务器并执行部署命令
-          # 关键：ssh命令与<< 'EOF'在同一行，添加StrictHostKeyChecking=no避免交互
-          ssh -v -p ${{ secrets.TOUGE_SSH_PORT }} \
-              -o HostKeyAlgorithms=+ssh-rsa \          # 兼容旧版RSA密钥
-              -o PubkeyAcceptedAlgorithms=+ssh-rsa \  # 允许RSA算法认证
-              -o StrictHostKeyChecking=no \           # 自动信任新主机，无交互
-              root@${{ secrets.TOUGE_SERVER_IP }} << 'EOF'
-            # 以下是在头歌服务器上执行的命令（set -e确保错误时退出）
+          # 连接服务器执行部署
+          ssh -v -p "${{ secrets.TOUGE_SSH_PORT }}" \
+              -o HostKeyAlgorithms=+ssh-rsa \
+              -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+              root@"${{ secrets.TOUGE_SERVER_IP }}" << 'EOF'
             set -e
             echo "成功连接服务器：$(whoami)@$(hostname)"
             
-            # 进入项目目录（不存在则报错退出，避免后续命令在错误目录执行）
             cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
+            git pull origin main || { echo "Git拉取失败"; exit 1; }
             
-            # 拉取main分支最新代码（失败则报错，便于排查Git问题）
-            git pull origin main || { echo "Git拉取最新代码失败"; exit 1; }
-            
-            # 更新Python依赖（确保依赖与本地一致）
             pip3 install --upgrade pip
-            pip3 install -r requirements.txt || { echo "项目依赖安装失败"; exit 1; }
+            pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
             
-            # 重启Flask应用（通过supervisor管理，确保应用生效）
-            supervisorctl restart flask-web-app || { echo "Flask应用重启失败"; exit 1; }
-            supervisorctl status flask-web-app  # 显示应用状态，便于日志排查
-            echo "自动化部署完成！"
-          EOF  # HERE文档结束标记（必须单独占一行，前后不能有空格）
-        env:
-          # 引用GitHub Secrets中的敏感信息（避免明文暴露）
-          TOUGE_SSH_PRIVATE_KEY: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
-          TOUGE_SERVER_IP: ${{ secrets.TOUGE_SERVER_IP }}
-          TOUGE_SSH_PORT: ${{ secrets.TOUGE_SSH_PORT }}
+            supervisorctl restart flask-web-app || { echo "应用重启失败"; exit 1; }
+            supervisorctl status flask-web-app
+            echo "部署完成"
+          EOF
